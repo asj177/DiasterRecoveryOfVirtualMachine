@@ -1,0 +1,314 @@
+public class RecoveryHandler {
+
+	@SuppressWarnings("static-access")
+	public static boolean recoverVM(VirtualMachine vm, HostSystem hs)
+			throws VmConfigFault, SnapshotFault, TaskInProgress, InvalidState,
+			InsufficientResourcesFault, NotFound, RuntimeFault, RemoteException, InterruptedException {
+
+		System.out.println("Name of vHost: " + hs.getName());
+		System.out.println("Name of vHost Status: "+ hs.getHealthStatusSystem().toString());
+		System.out.println("VM name: " + vm.getName());
+		System.out.println("Recovering VM from current snapshot....");
+		
+		// Case 1 : To recover the VM on the same Host
+		
+		if (hs.getSummary().runtime.powerState == hs.getSummary().runtime.powerState.poweredOn) {
+		
+			recoverVMtoSameHost(vm,hs);
+			
+			System.out.println("case 1");
+			return true;
+		}
+		
+		// Case 2 : Try to make VHost alive - 3 attempts
+		
+		else if(hs.getSummary().runtime.powerState == hs.getSummary().runtime.powerState.poweredOff ||
+				hs.getSummary().runtime.connectionState == hs.getSummary().runtime.connectionState.disconnected){
+			if(reconnectHostandRecoverVM(vm,hs)){
+				
+				System.out.println("case 2");
+				return true;
+			}
+		}
+				
+		//Case 3 : To move the VM on other available host and to recover the current vHost
+		else {
+			List<HostSystem> vHosts = InfrastructureData.getInstance().getHostSystems();
+			if (vHosts.size() != 1) {
+				for (HostSystem vHost : vHosts) {
+					if (vHost.getSummary().runtime.powerState == vHost
+							.getSummary().runtime.powerState.poweredOn) {
+						if(migrateVMandRecover(vm,vHost)){
+							System.out.println("case 3");
+							return true;
+						}
+					}				
+				}				
+			} 
+			
+			else{
+				//case 4: if none of the host is alive then recover the current vHost
+				
+				
+				System.out.println(hs.getName() +" Host is being recovered... - ");
+				VirtualMachine vHostVM = getvHostFromAdminVCenter(hs.getName().substring(11, hs.getName().length()));
+				Task taskHost = vHostVM.revertToCurrentSnapshot_Task(null);
+				if (taskHost.getTaskInfo().getState() == taskHost.getTaskInfo().getState().success) {
+					System.out.println("vHost has been recovered on the admin vCenter..");
+				}
+				System.out.println("Now recovering Vm's on " + vHostVM.getName());
+				recoverVMtoSameHost(vm,hs);
+				System.out.println("VM is recovered on " +vHostVM.getName());
+				System.out.println("case 4");
+			}
+		}
+
+		return true;
+	}
+
+	/*
+	 * To Add a Host private static HostSystem addvHostFromAdminvCenter() {
+	 * 
+	 * ServiceInstance adminService = InfrastructureData.getInstance()
+	 * .getAdminServiceInstance(); return null; }
+	 */
+
+	private static VirtualMachine getvHostFromAdminVCenter(String vHostName)
+			throws InvalidProperty, RuntimeFault, RemoteException {
+		ServiceInstance instanceAdmin = InfrastructureData.getInstance().getAdminServiceInstance();
+		Folder rootAdmin = instanceAdmin.getRootFolder();
+		ComputeResource computeResource = null;
+		ManagedEntity[] mesAdmin = new InventoryNavigator(rootAdmin).searchManagedEntities("ComputeResource");
+		for(int j=0;j<mesAdmin.length;j++){
+		if(mesAdmin[j].getName().equals("130.65.132.61")){
+			 computeResource = (ComputeResource) mesAdmin[j];
+		}
+		}
+		
+		System.out.println(computeResource.getName());
+		ResourcePool rp = computeResource.getResourcePool();
+		for(int index=0;index<rp.getResourcePools().length;index++){
+			if(rp.getResourcePools()[index].getName().equals("Team04_vHost")){
+				ResourcePool myResource = rp.getResourcePools()[index];
+				//System.out.println(myResource.getVMs()[2].getName());
+				for(int i=0;i<myResource.getVMs().length;i++){
+					if(myResource.getVMs()[i].getName().contains(vHostName)){
+						System.out.println("vm found");
+						return myResource.getVMs()[i];
+					}
+						
+				System.out.println(myResource.getVMs()[i].getName());
+				}
+			}
+		}
+		
+		return null;
+	}
+
+
+	private static boolean migrateVMandRecover(VirtualMachine vm,HostSystem hs) throws VmConfigFault, Timedout, FileFault, InvalidState, InsufficientResourcesFault, MigrationFault, RuntimeFault, RemoteException{
+		ComputeResource cr = (ComputeResource) hs.getParent();
+		Task taskVm = vm.migrateVM_Task(cr.getResourcePool(), hs, VirtualMachineMovePriority.highPriority, VirtualMachinePowerState.poweredOff);
+		
+		while (taskVm.getTaskInfo().state == taskVm.getTaskInfo().state.running) {
+		}				
+		Task revertTask = vm.revertToCurrentSnapshot_Task(null);
+		while (revertTask.getTaskInfo().state == revertTask.getTaskInfo().state.running) {
+		}
+		vm.powerOnVM_Task(null);
+		if (revertTask.getTaskInfo().getState() == revertTask.getTaskInfo().getState().success) {
+			System.out.println("VM has been recovered on vHost - "+hs.getName());
+			return true;
+		}
+		return false;
+	}
+	
+	private static void recoverVMtoSameHost(VirtualMachine vm,HostSystem host) throws InvalidProperty, RuntimeFault, RemoteException{
+		Task task = vm.revertToCurrentSnapshot_Task(null);
+		while (task.getTaskInfo().state == task.getTaskInfo().state.running) {
+		}
+		if (task.getTaskInfo().getState().success == TaskInfoState.success) {
+			System.out.println("VM has been recovered on vHost - "+host.getName());
+		}
+		Task taskVm = vm.powerOnVM_Task(host);
+		while (taskVm.getTaskInfo().state == taskVm.getTaskInfo().state.running) {
+		}
+	}
+	
+/*	private static boolean reconnectHostandRecoverVM(VirtualMachine vm,HostSystem hs) throws InvalidProperty, RuntimeFault, RemoteException {
+		
+		VirtualMachine vmFromAdmin =getvHostFromAdminVCenter(hs.getName().substring(11, hs.getName().length()));					
+		Task task = vmFromAdmin.powerOnVM_Task(null);
+		while (task.getTaskInfo().state == task.getTaskInfo().state.running) {
+			System.out.print(". ");
+		}
+		System.out.println("vHost is powered on now..");
+		System.out.println("Trying to reconnect vHost...");
+		for(int attempt=0;attempt<3;attempt++){
+			System.out.println("Attempt no -"+attempt);
+			Task reconnectTask = hs.reconnectHost_Task(null);
+			while (reconnectTask.getTaskInfo().state == reconnectTask.getTaskInfo().state.running) {
+				System.out.print(".");
+			}
+		if(hs.getSummary().runtime.powerState == hs.getSummary().runtime.powerState.poweredOn){
+			System.out.println("VHost is connected now..");
+			migrateVMandRecover(vm,hs);
+			return true;
+		}	
+	}
+		
+		return false;
+		
+	}*/
+	
+	
+	
+	
+	
+	
+	Example Miscellaneous
+	
+	/*@SuppressWarnings({ "static-access" })
+	public boolean recoverVMs(ServiceInstance sInstance,HostSystem host, VirtualMachine vm) throws Exception{
+		Connectors adminConn=new Connectors();
+		ServiceInstance sAdminInstance=adminConn.getAdminConn();
+		Folder rootAdminFolder = sAdminInstance.getRootFolder();
+		System.out.println("Hostname: "+ host.getName().toString()+ "Vm"+":"+vm.getName().toString());
+		//Recover VMs on the same host:
+		String hostip=host.getName().toString();
+		Folder rootFolder = sInstance.getRootFolder();
+		HostSystem hostCheck=(HostSystem)new InventoryNavigator(rootFolder).searchManagedEntity("HostSystem", hostip);
+		if(hostCheck!=null && vm!=null){
+			System.out.println("Hostname: "+ host.getName().toString()+ "Vm"+":"+vm.getName().toString());
+			if(hostCheck.getSummary().runtime.powerState == hostCheck.getSummary().runtime.powerState.poweredOn){
+				Task task = vm.revertToCurrentSnapshot_Task(null);
+				if (task.waitForTask()==Task.SUCCESS) {
+					System.out.println("Congratulations....VM has been recovered..");
+				}
+				System.out.println("Powering On VM on the same host");
+				Task taskVm = vm.powerOnVM_Task(host);
+				if (taskVm.waitForTask()==Task.SUCCESS) {
+					System.out.println("Congratulations....VM has been Successfully Powered On..");
+				}
+				return true;
+
+			}else if(hostCheck.getSummary().runtime.powerState==hostCheck.getSummary().runtime.powerState.poweredOff ||
+					hostCheck.getSummary().runtime.powerState==hostCheck.getSummary().runtime.powerState.){
+				VirtualMachine currentHost = (VirtualMachine) new InventoryNavigator(rootAdminFolder).searchManagedEntity("HostName",hostCheck.getName().toString());
+				Task task = currentHost.powerOnVM_Task(null);
+				if(Task.SUCCESS==task.waitForTask()){
+					System.out.println("OOOOOO  Started");
+				}else{
+					System.out.println("MayDay MayDay!!!! Houston, we gotta problem");
+				
+				System.out.println("Trying to reconnect....");
+				vCenterConfig vCenter=new vCenterConfig();
+				Task taskHost=hostCheck.reconnectHost_Task(null);
+				Thread.sleep(1000*60*5);
+				if(Task.SUCCESS==taskHost.waitForTask()){
+					System.out.println("OOoooooOOOOooooo  Reconnection Acquired");
+				}else{
+					System.out.println("MayDay MayDay!!!! Houston, we gotta problem");
+				}
+				}
+			}else{
+				//Move the VM to another vHost available at DataCenter
+				HostManager manager=new HostManager(sInstance);
+				HashMap<HostSystem, List<VirtualMachine>> vHostVM=manager.hostManager();
+				String newHost=null;
+				for (Map.Entry<HostSystem, List<VirtualMachine>> entry : vHostVM.entrySet()){
+					if(!entry.getValue().contains(vm)){
+						newHost=entry.getKey().getName().toString();
+					}
+					System.out.println("*****************************************************************************");
+					System.out.println("Trying to reconnect....");
+					vCenterConfig vCenter=new vCenterConfig();
+					HostConnectSpec hostProp=new HostConnectSpec();
+					hostProp.hostName=hostCheck.getName().toString();
+					hostProp.userName=vCenter.getHostUser();
+					hostProp.password=vCenter.getpWord();
+					if(hostCheck.getName().toString().equals("130.65.132.223")){
+						hostProp.sslThumbprint="B7:85:7E:1E:65:8E:34:B1:69:7A:DB:64:07:03:60:C3:2E:3F:78:00";
+					}else if(hostCheck.getName().toString().equals("130.65.132.222")){
+						hostProp.sslThumbprint="0F:9C:EC:78:AE:F3:5D:56:51:96:D2:39:5B:7C:B2:9D:06:77:6F:C6";
+					}
+					Task taskHost=hostCheck.reconnectHost_Task(hostProp);
+					if(Task.SUCCESS==taskHost.waitForTask()){
+						int t=0;
+						while(t<10){
+							System.out.print("*");
+							t++;
+						}
+					}else{
+						System.out.println("MayDay MayDay!!!! Houston, we gotta problem");
+					}
+					
+					Thread.sleep(1000*60*5);
+					
+					Boolean success=migrateVM(newHost, sInstance, vm.getName().toString()); 
+					if(success){
+						System.out.println("Successfully Migrated");
+					}else{
+						System.out.println("MayDay MayDay!!!! Houston, we gotta problem");
+					}
+				}
+				
+//				
+//				System.out.println("Trying to reconnect....");
+//				vCenterConfig vCenter=new vCenterConfig();
+//				HostConnectSpec hostProp=new HostConnectSpec();
+//				hostProp.hostName=hostCheck.getName().toString();
+//				hostProp.userName=vCenter.getHostUser();
+//				hostProp.password=vCenter.getpWord();
+//				if(hostCheck.getName().toString().equals("130.65.132.223")){
+//					hostProp.sslThumbprint="B7:85:7E:1E:65:8E:34:B1:69:7A:DB:64:07:03:60:C3:2E:3F:78:00";
+//				}else if(hostCheck.getName().toString().equals("130.65.132.222")){
+//					hostProp.sslThumbprint="0F:9C:EC:78:AE:F3:5D:56:51:96:D2:39:5B:7C:B2:9D:06:77:6F:C6";
+//				}
+//				
+//				Task taskHost2=hostCheck.reconnectHost_Task(hostProp);
+//				Thread.sleep(1000*60*5);
+//				if(Task.SUCCESS==taskHost2.waitForTask()){
+//					System.out.println("OOoooooOOOOooooo  Reconnection Acquired");
+//				}else{
+//					System.out.println("MayDay MayDay!!!! Houston, we gotta problem");
+//				}
+				return true;
+			}
+		}
+		return false;
+	}
+	
+//	/**
+//	 * @return 
+//	 * @Adding Host to the Data Center
+//	 */
+//	
+//	@SuppressWarnings("null")
+//	public VirtualMachine addHost(HostSystem host) throws Exception{
+//		Connectors adminConn=new Connectors();
+//		ServiceInstance sAdminInstance=adminConn.getAdminConn();
+//		// Folder rootAdminFolder = sAdminInstance.getRootFolder();
+//		Folder rootAdmin = sAdminInstance.getRootFolder();
+//		ComputeResource computeResource = null;
+//	//	ManagedEntity mesAdmin = new InventoryNavigator(rootAdmin).searchManagedEntity("ComputeResource","130.65.132.222");
+//		System.out.println(computeResource.getName());
+//		ResourcePool rp = computeResource.getResourcePool();
+//		System.out.println("Hostname: "+ host.getName().toString());
+//		for(int i=0;i<rp.getResourcePools().length;i++){
+//			if(rp.getResourcePools()[i].getName().equals("Team10_vHost")){
+//				ResourcePool res = rp.getResourcePools()[i];
+//				//System.out.println(myResource.getVMs()[2].getName());
+//				for(int j=0;j<res.getVMs().length;j++){
+//					if(res.getVMs()[j].getName().contains((host.getName().toString()))){
+//						System.out.println("vm found");
+//						return res.getVMs()[j];
+//					}	
+//				System.out.println(res.getVMs()[i].getName());
+//				}
+//			}
+//		}
+//		return null; 
+//	}
+
+*/
